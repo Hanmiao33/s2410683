@@ -205,7 +205,7 @@ int gauss_elimination_simd(float *A, float *b, int n)
 int main(int argc, char *argv[])
 {
     int n = 1024;
-    int seed = 20260408;
+    int seed = 114514;
     int num_runs = 5;
     bool scalar = false;  // mode: 0=SIMD+OMP, 1=scalar baseline
 
