@@ -89,7 +89,20 @@ float verify_solution(const float *A, const float *x, const float *b_orig, int n
 int gauss_elimination_scalar(float *A, float *b, int n)
 {
     for (int k = 0; k < n; ++k) {
+        int maxrow = k;
+        float maxval = std::fabs(A[k * n + k]);
+        for (int i = k + 1; i < n; ++i) {
+            float val = std::fabs(A[i * n + k]);
+            if (val > maxval) { maxval = val; maxrow = i; }
+        }
+        if (maxrow != k) {
+            for (int j = k; j < n; ++j)
+                std::swap(A[k * n + j], A[maxrow * n + j]);
+            std::swap(b[k], b[maxrow]);
+        }
+
         float pivot = A[k * n + k];
+        if (std::fabs(pivot) < 1e-12f) return -1;
         for (int j = k + 1; j < n; ++j)
             A[k * n + j] /= pivot;
         A[k * n + k] = 1.0f;
@@ -115,6 +128,18 @@ int gauss_elimination_scalar(float *A, float *b, int n)
 int gauss_elimination_simd(float *A, float *b, int n)
 {
     for (int k = 0; k < n; ++k) {
+        int maxrow = k;
+        float maxval = std::fabs(A[k * n + k]);
+        for (int i = k + 1; i < n; ++i) {
+            float val = std::fabs(A[i * n + k]);
+            if (val > maxval) { maxval = val; maxrow = i; }
+        }
+        if (maxrow != k) {
+            for (int j = k; j < n; ++j)
+                std::swap(A[k * n + j], A[maxrow * n + j]);
+            std::swap(b[k], b[maxrow]);
+        }
+
         float pivot = A[k * n + k];
         float32x4_t vt = vdupq_n_f32(pivot);
 
