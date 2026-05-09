@@ -30,10 +30,9 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
         for (int j = i + 1; j < n; ++j)
             A[i * n + j] = lcg_randf();
     }
-    for (int k = 0; k < n; ++k)
-        for (int i = k + 1; i < n; ++i)
-            for (int j = 0; j < n; ++j)
-                A[i * n + j] += A[k * n + j];
+    for (int k = 0; k < n - 1; ++k)
+        for (int j = 0; j < n; ++j)
+            A[(k + 1) * n + j] += A[k * n + j];
 
     for (int i = 0; i < n; ++i)
         x_true[i] = (float)(i + 1);
