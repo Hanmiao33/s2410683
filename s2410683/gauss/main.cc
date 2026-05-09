@@ -1,43 +1,24 @@
 #include <vector>
-#include <cstring>
 #include <string>
 #include <iostream>
 #include <fstream>
 #include <chrono>
 #include <iomanip>
-#include <sstream>
-#include <sys/time.h>
 #include <omp.h>
 #include <arm_neon.h>
 #include <cmath>
-#include <cstdlib>
 
-// 高斯消元 SIMD 实现，严格遵循手册 2.1.2 节 Algorithm 1:
-// "SIMD Intrinsic 算法"
-//
-// 算法核心:
-//   1. 归一化主元行: A[k,j] /= A[k,k]，令 A[k,k] = 1.0
-//   2. 对下方每行 i: A[i,j] -= A[k,j] * A[i,k]，令 A[i,k] = 0
-//   3. 回代求解
-//
-// SIMD 应用于步骤 1-2 的内层循环，每次处理 4 个 float (ARM NEON)
-
-// 手册 Listing 1 使用的 LCG 伪随机数生成器
-// 避免 std::rand() 在不同平台行为不一致
+// 用自定义 LCG 替代 std::rand()，保证跨平台结果一致
 static unsigned lcg_state;
 static unsigned lcg_rand() {
     lcg_state = lcg_state * 1103515245u + 12345u;
     return lcg_state & 0x7fffffffu;
 }
 
-// 按手册 Listing 1 生成测试矩阵
-// 上三角随机 → 逐行累加 → 保证非奇异
 void generate_test(float *A, float *b, float *x_true, int n, int seed)
 {
     lcg_state = (unsigned)seed;
 
-    // 手册 Listing 1: m_reset()
-    // 第一阶段: 上三角, 对角线=1.0, 上三角=rand()
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < i; ++j)
             A[i * n + j] = 0.0f;
@@ -45,13 +26,11 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
         for (int j = i + 1; j < n; ++j)
             A[i * n + j] = (float)lcg_rand();
     }
-    // 第二阶段: 逐行累加(第 k 行加到下方所有行)
     for (int k = 0; k < n; ++k)
         for (int i = k + 1; i < n; ++i)
             for (int j = 0; j < n; ++j)
                 A[i * n + j] += A[k * n + j];
 
-    // 生成预设解 x_true[i] = i+1.0, 计算 b = A * x_true
     for (int i = 0; i < n; ++i)
         x_true[i] = (float)(i + 1);
     for (int i = 0; i < n; ++i) {
@@ -62,7 +41,6 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
     }
 }
 
-// 从文件读取数据
 bool load_from_file(const std::string &path, std::vector<float> &A,
                     std::vector<float> &b, int &n)
 {
@@ -80,7 +58,6 @@ bool load_from_file(const std::string &path, std::vector<float> &A,
     return true;
 }
 
-// 将解写入文件
 void save_solution(const std::string &path, const float *x, int n)
 {
     std::ofstream fout(path);
@@ -88,7 +65,6 @@ void save_solution(const std::string &path, const float *x, int n)
         fout << std::fixed << std::setprecision(8) << x[i] << '\n';
 }
 
-// 验证 ||Ax - b|| / ||b||
 float verify_solution(const float *A, const float *x, const float *b_orig, int n)
 {
     float norm_res = 0.0f, norm_b = 0.0f;
@@ -103,7 +79,6 @@ float verify_solution(const float *A, const float *x, const float *b_orig, int n
     return std::sqrt(norm_res) / (std::sqrt(norm_b) + 1e-12f);
 }
 
-// 标量版本 (无 SIMD, 无 OpenMP, 作为基线)
 int gauss_elimination_scalar(float *A, float *b, int n)
 {
     for (int k = 0; k < n; ++k) {
@@ -130,80 +105,53 @@ int gauss_elimination_scalar(float *A, float *b, int n)
     return 0;
 }
 
-// 手册 Algorithm 1: SIMD Intrinsic 高斯消元
 int gauss_elimination_simd(float *A, float *b, int n)
 {
-    // ---- 前向消元 (手册 Algorithm 1 + b 向量处理) ----
     for (int k = 0; k < n; ++k) {
         float pivot = A[k * n + k];
-
-        // 步骤 2-6: 归一化主元行 (SIMD)
-        // vt = dupTo4Float(A[k,k])
         float32x4_t vt = vdupq_n_f32(pivot);
 
         int j = k + 1;
         for (; j + 3 < n; j += 4) {
-            // va = load4FloatFrom(&A[k,j])
             float32x4_t va = vld1q_f32(&A[k * n + j]);
-            // va = va / vt
             va = vdivq_f32(va, vt);
-            // store4FloatTo(&A[k,j], va)
             vst1q_f32(&A[k * n + j], va);
         }
-        // 步骤 7-8: 尾部标量
-        for (; j < n; ++j) {
+        for (; j < n; ++j)
             A[k * n + j] /= pivot;
-        }
-        // 步骤 9: A[k,k] = 1.0
         A[k * n + k] = 1.0f;
-
-        // 同步归一化 b[k]
         b[k] /= pivot;
 
-        // 步骤 10-20: 消去主元列下方的所有行
         #pragma omp parallel for schedule(static)
         for (int i = k + 1; i < n; ++i) {
-            // vaik = dupToVector4(A[i,k])
             float factor = A[i * n + k];
             float32x4_t vaik = vdupq_n_f32(factor);
 
             int jj = k + 1;
             for (; jj + 3 < n; jj += 4) {
-                // vakj = load4FloatFrom(&A[k,j])
                 float32x4_t vakj = vld1q_f32(&A[k * n + jj]);
-                // vaij = load4FloatFrom(&A[i,j])
                 float32x4_t vaij = vld1q_f32(&A[i * n + jj]);
-                // vx = vakj * vaik
                 float32x4_t vx = vmulq_f32(vakj, vaik);
-                // vaij = vaij - vx
                 vaij = vsubq_f32(vaij, vx);
-                // store4FloatTo(&A[i,j], vaij)
                 vst1q_f32(&A[i * n + jj], vaij);
             }
-            // 步骤 18-19: 尾部标量
-            for (; jj < n; ++jj) {
+            for (; jj < n; ++jj)
                 A[i * n + jj] -= A[k * n + jj] * factor;
-            }
-            // b[i] -= b[k] * factor
             b[i] -= b[k] * factor;
-            // 步骤 20: A[i,k] = 0
             A[i * n + k] = 0.0f;
         }
     }
 
-    // ---- 回代 (手册 2.1 节 16-23 行) ----
     for (int i = n - 1; i >= 0; --i) {
         float sum = b[i];
         int j = i + 1;
-        // SIMD 点积: sum -= A[i,j] * x[j]
         for (; j + 3 < n; j += 4) {
             float32x4_t a_vec = vld1q_f32(&A[i * n + j]);
             float32x4_t x_vec = vld1q_f32(&b[j]);
             sum -= vaddvq_f32(vmulq_f32(a_vec, x_vec));
         }
-        for (; j < n; ++j) {
+        for (; j < n; ++j)
             sum -= A[i * n + j] * b[j];
-        }
         b[i] = sum / A[i * n + i];
     }
 
@@ -215,7 +163,7 @@ int main(int argc, char *argv[])
     int n = 1024;
     int seed = 114514;
     int num_runs = 5;
-    bool scalar = false;  // mode: 0=SIMD+OMP, 1=scalar baseline
+    bool scalar = false;
 
     if (argc >= 2) n = std::stoi(argv[1]);
     if (argc >= 3) seed = std::stoi(argv[2]);
