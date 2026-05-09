@@ -38,10 +38,10 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
     for (int i = 0; i < n; ++i)
         x_true[i] = (float)(i + 1);
     for (int i = 0; i < n; ++i) {
-        float sum = 0.0f;
+        double sum = 0.0;
         for (int j = 0; j < n; ++j)
-            sum += A[i * n + j] * x_true[j];
-        b[i] = sum;
+            sum += (double)A[i * n + j] * (double)x_true[j];
+        b[i] = (float)sum;
     }
 }
 
@@ -71,16 +71,18 @@ void save_solution(const std::string &path, const float *x, int n)
 
 float verify_solution(const float *A, const float *x, const float *b_orig, int n)
 {
-    float norm_res = 0.0f, norm_b = 0.0f;
+    double norm_res = 0.0, norm_b = 0.0;
     for (int i = 0; i < n; ++i) {
-        float ax = 0.0f;
+        double ax = 0.0;
         for (int j = 0; j < n; ++j)
-            ax += A[i * n + j] * x[j];
-        float diff = ax - b_orig[i];
+            ax += (double)A[i * n + j] * (double)x[j];
+        double diff = ax - (double)b_orig[i];
         norm_res += diff * diff;
-        norm_b += b_orig[i] * b_orig[i];
+        norm_b += (double)b_orig[i] * (double)b_orig[i];
     }
-    return std::sqrt(norm_res) / (std::sqrt(norm_b) + 1e-12f);
+    if (!std::isfinite(norm_res) || !std::isfinite(norm_b))
+        return NAN;
+    return (float)(std::sqrt(norm_res) / (std::sqrt(norm_b) + 1e-12));
 }
 
 int gauss_elimination_scalar(float *A, float *b, int n)
