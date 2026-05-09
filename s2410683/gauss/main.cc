@@ -22,11 +22,19 @@
 //
 // SIMD 应用于步骤 1-2 的内层循环，每次处理 4 个 float (ARM NEON)
 
+// 手册 Listing 1 使用的 LCG 伪随机数生成器
+// 避免 std::rand() 在不同平台行为不一致
+static unsigned lcg_state;
+static unsigned lcg_rand() {
+    lcg_state = lcg_state * 1103515245u + 12345u;
+    return lcg_state & 0x7fffffffu;
+}
+
 // 按手册 Listing 1 生成测试矩阵
 // 上三角随机 → 逐行累加 → 保证非奇异
 void generate_test(float *A, float *b, float *x_true, int n, int seed)
 {
-    std::srand(seed);
+    lcg_state = (unsigned)seed;
 
     // 手册 Listing 1: m_reset()
     // 第一阶段: 上三角, 对角线=1.0, 上三角=rand()
@@ -35,7 +43,7 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
             A[i * n + j] = 0.0f;
         A[i * n + i] = 1.0f;
         for (int j = i + 1; j < n; ++j)
-            A[i * n + j] = (float)std::rand();
+            A[i * n + j] = (float)lcg_rand();
     }
     // 第二阶段: 逐行累加(第 k 行加到下方所有行)
     for (int k = 0; k < n; ++k)
@@ -260,7 +268,7 @@ int main(int argc, char *argv[])
         }
 
         float rel_err = verify_solution(A_orig.data(), b_run.data(), b_orig.data(), n);
-        if (rel_err > 1e-3f) {
+        if (!std::isfinite(rel_err) || rel_err > 1e-3f) {
             std::cerr << "Run " << run << ": error too large: " << rel_err << std::endl;
             success = false;
         }
@@ -280,7 +288,10 @@ int main(int argc, char *argv[])
         save_solution("files/solution.txt", b_final.data(), n);
 
         float rel_err = verify_solution(A_orig.data(), b_final.data(), b_orig.data(), n);
-        std::cout << "Relative error ||Ax-b||/||b||: " << rel_err << std::endl;
+        if (std::isfinite(rel_err))
+            std::cout << "Relative error ||Ax-b||/||b||: " << rel_err << std::endl;
+        else
+            std::cout << "Relative error ||Ax-b||/||b||: nan (matrix likely singular)" << std::endl;
     }
 
     return success ? 0 : 1;
