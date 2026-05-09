@@ -202,7 +202,7 @@ int main(int argc, char *argv[])
     if (argc >= 4) num_runs = std::stoi(argv[3]);
     if (argc >= 5) scalar = (std::stoi(argv[4]) != 0);
 
-    std::cout << "Gaussian Elimination"
+    std::cout << "[build:20260510] Gaussian Elimination"
               << (scalar ? " (scalar baseline)" : " with SIMD (ARM NEON + OpenMP)")
               << std::endl;
     std::cout << "Matrix: " << n << " x " << n << std::endl;
