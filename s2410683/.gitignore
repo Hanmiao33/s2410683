@@ -1,0 +1,29 @@
+# VS Code Server
+.vscode-server/
+
+# Claude
+.claude/
+.ai_completion/
+
+# VS Code
+.vscode/
+.dist/
+
+# System
+.cache/
+.local/
+.dotnet/
+.pki/
+.ssh/
+.copilot/
+.bash_history
+.bash_logout
+.bash_profile
+.bashrc
+.gitconfig
+.wget-hsts
+
+# Build artifacts
+*.o
+*.out
+main
