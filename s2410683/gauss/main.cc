@@ -12,7 +12,7 @@
 static unsigned lcg_state;
 static unsigned lcg_rand() {
     lcg_state = lcg_state * 1103515245u + 12345u;
-    return lcg_state & 0x7fffffffu;
+    return (lcg_state >> 16) & 0x7fff;
 }
 
 void generate_test(float *A, float *b, float *x_true, int n, int seed)
