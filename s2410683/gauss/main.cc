@@ -12,7 +12,11 @@
 static unsigned lcg_state;
 static unsigned lcg_rand() {
     lcg_state = lcg_state * 1103515245u + 12345u;
-    return (lcg_state >> 16) & 0x7fff;
+    return lcg_state & 0x7fffffffu;
+}
+
+static float lcg_randf() {
+    return (float)lcg_rand() / 2147483648.0f;
 }
 
 void generate_test(float *A, float *b, float *x_true, int n, int seed)
@@ -24,7 +28,7 @@ void generate_test(float *A, float *b, float *x_true, int n, int seed)
             A[i * n + j] = 0.0f;
         A[i * n + i] = 1.0f;
         for (int j = i + 1; j < n; ++j)
-            A[i * n + j] = (float)lcg_rand();
+            A[i * n + j] = lcg_randf();
     }
     for (int k = 0; k < n; ++k)
         for (int i = k + 1; i < n; ++i)
