@@ -1,0 +1,287 @@
+#include <vector>
+#include <cstring>
+#include <string>
+#include <iostream>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+#include <sys/time.h>
+#include <omp.h>
+#include <arm_neon.h>
+#include <cmath>
+#include <cstdlib>
+
+// 高斯消元 SIMD 实现，严格遵循手册 2.1.2 节 Algorithm 1:
+// "SIMD Intrinsic 算法"
+//
+// 算法核心:
+//   1. 归一化主元行: A[k,j] /= A[k,k]，令 A[k,k] = 1.0
+//   2. 对下方每行 i: A[i,j] -= A[k,j] * A[i,k]，令 A[i,k] = 0
+//   3. 回代求解
+//
+// SIMD 应用于步骤 1-2 的内层循环，每次处理 4 个 float (ARM NEON)
+
+// 按手册 Listing 1 生成测试矩阵
+// 上三角随机 → 逐行累加 → 保证非奇异
+void generate_test(float *A, float *b, float *x_true, int n, int seed)
+{
+    std::srand(seed);
+
+    // 手册 Listing 1: m_reset()
+    // 第一阶段: 上三角, 对角线=1.0, 上三角=rand()
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < i; ++j)
+            A[i * n + j] = 0.0f;
+        A[i * n + i] = 1.0f;
+        for (int j = i + 1; j < n; ++j)
+            A[i * n + j] = (float)std::rand();
+    }
+    // 第二阶段: 逐行累加(第 k 行加到下方所有行)
+    for (int k = 0; k < n; ++k)
+        for (int i = k + 1; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                A[i * n + j] += A[k * n + j];
+
+    // 生成预设解 x_true[i] = i+1.0, 计算 b = A * x_true
+    for (int i = 0; i < n; ++i)
+        x_true[i] = (float)(i + 1);
+    for (int i = 0; i < n; ++i) {
+        float sum = 0.0f;
+        for (int j = 0; j < n; ++j)
+            sum += A[i * n + j] * x_true[j];
+        b[i] = sum;
+    }
+}
+
+// 从文件读取数据
+bool load_from_file(const std::string &path, std::vector<float> &A,
+                    std::vector<float> &b, int &n)
+{
+    std::ifstream fin(path);
+    if (!fin.is_open()) return false;
+    fin >> n;
+    A.resize(n * n);
+    b.resize(n);
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j)
+            fin >> A[i * n + j];
+        fin >> b[i];
+    }
+    fin.close();
+    return true;
+}
+
+// 将解写入文件
+void save_solution(const std::string &path, const float *x, int n)
+{
+    std::ofstream fout(path);
+    for (int i = 0; i < n; ++i)
+        fout << std::fixed << std::setprecision(8) << x[i] << '\n';
+}
+
+// 验证 ||Ax - b|| / ||b||
+float verify_solution(const float *A, const float *x, const float *b_orig, int n)
+{
+    float norm_res = 0.0f, norm_b = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        float ax = 0.0f;
+        for (int j = 0; j < n; ++j)
+            ax += A[i * n + j] * x[j];
+        float diff = ax - b_orig[i];
+        norm_res += diff * diff;
+        norm_b += b_orig[i] * b_orig[i];
+    }
+    return std::sqrt(norm_res) / (std::sqrt(norm_b) + 1e-12f);
+}
+
+// 标量版本 (无 SIMD, 无 OpenMP, 作为基线)
+int gauss_elimination_scalar(float *A, float *b, int n)
+{
+    for (int k = 0; k < n; ++k) {
+        float pivot = A[k * n + k];
+        for (int j = k + 1; j < n; ++j)
+            A[k * n + j] /= pivot;
+        A[k * n + k] = 1.0f;
+        b[k] /= pivot;
+
+        for (int i = k + 1; i < n; ++i) {
+            float factor = A[i * n + k];
+            for (int j = k + 1; j < n; ++j)
+                A[i * n + j] -= A[k * n + j] * factor;
+            b[i] -= b[k] * factor;
+            A[i * n + k] = 0.0f;
+        }
+    }
+    for (int i = n - 1; i >= 0; --i) {
+        float sum = b[i];
+        for (int j = i + 1; j < n; ++j)
+            sum -= A[i * n + j] * b[j];
+        b[i] = sum / A[i * n + i];
+    }
+    return 0;
+}
+
+// 手册 Algorithm 1: SIMD Intrinsic 高斯消元
+int gauss_elimination_simd(float *A, float *b, int n)
+{
+    // ---- 前向消元 (手册 Algorithm 1 + b 向量处理) ----
+    for (int k = 0; k < n; ++k) {
+        float pivot = A[k * n + k];
+
+        // 步骤 2-6: 归一化主元行 (SIMD)
+        // vt = dupTo4Float(A[k,k])
+        float32x4_t vt = vdupq_n_f32(pivot);
+
+        int j = k + 1;
+        for (; j + 3 < n; j += 4) {
+            // va = load4FloatFrom(&A[k,j])
+            float32x4_t va = vld1q_f32(&A[k * n + j]);
+            // va = va / vt
+            va = vdivq_f32(va, vt);
+            // store4FloatTo(&A[k,j], va)
+            vst1q_f32(&A[k * n + j], va);
+        }
+        // 步骤 7-8: 尾部标量
+        for (; j < n; ++j) {
+            A[k * n + j] /= pivot;
+        }
+        // 步骤 9: A[k,k] = 1.0
+        A[k * n + k] = 1.0f;
+
+        // 同步归一化 b[k]
+        b[k] /= pivot;
+
+        // 步骤 10-20: 消去主元列下方的所有行
+        #pragma omp parallel for schedule(static)
+        for (int i = k + 1; i < n; ++i) {
+            // vaik = dupToVector4(A[i,k])
+            float factor = A[i * n + k];
+            float32x4_t vaik = vdupq_n_f32(factor);
+
+            int jj = k + 1;
+            for (; jj + 3 < n; jj += 4) {
+                // vakj = load4FloatFrom(&A[k,j])
+                float32x4_t vakj = vld1q_f32(&A[k * n + jj]);
+                // vaij = load4FloatFrom(&A[i,j])
+                float32x4_t vaij = vld1q_f32(&A[i * n + jj]);
+                // vx = vakj * vaik
+                float32x4_t vx = vmulq_f32(vakj, vaik);
+                // vaij = vaij - vx
+                vaij = vsubq_f32(vaij, vx);
+                // store4FloatTo(&A[i,j], vaij)
+                vst1q_f32(&A[i * n + jj], vaij);
+            }
+            // 步骤 18-19: 尾部标量
+            for (; jj < n; ++jj) {
+                A[i * n + jj] -= A[k * n + jj] * factor;
+            }
+            // b[i] -= b[k] * factor
+            b[i] -= b[k] * factor;
+            // 步骤 20: A[i,k] = 0
+            A[i * n + k] = 0.0f;
+        }
+    }
+
+    // ---- 回代 (手册 2.1 节 16-23 行) ----
+    for (int i = n - 1; i >= 0; --i) {
+        float sum = b[i];
+        int j = i + 1;
+        // SIMD 点积: sum -= A[i,j] * x[j]
+        for (; j + 3 < n; j += 4) {
+            float32x4_t a_vec = vld1q_f32(&A[i * n + j]);
+            float32x4_t x_vec = vld1q_f32(&b[j]);
+            sum -= vaddvq_f32(vmulq_f32(a_vec, x_vec));
+        }
+        for (; j < n; ++j) {
+            sum -= A[i * n + j] * b[j];
+        }
+        b[i] = sum / A[i * n + i];
+    }
+
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    int n = 1024;
+    int seed = 20260408;
+    int num_runs = 5;
+    bool scalar = false;  // mode: 0=SIMD+OMP, 1=scalar baseline
+
+    if (argc >= 2) n = std::stoi(argv[1]);
+    if (argc >= 3) seed = std::stoi(argv[2]);
+    if (argc >= 4) num_runs = std::stoi(argv[3]);
+    if (argc >= 5) scalar = (std::stoi(argv[4]) != 0);
+
+    std::cout << "Gaussian Elimination"
+              << (scalar ? " (scalar baseline)" : " with SIMD (ARM NEON + OpenMP)")
+              << std::endl;
+    std::cout << "Matrix: " << n << " x " << n << std::endl;
+    std::cout << "Seed: " << seed << std::endl;
+    std::cout << "Threads: " << omp_get_max_threads() << std::endl;
+
+    std::vector<float> A(n * n), b(n), x_true(n);
+    generate_test(A.data(), b.data(), x_true.data(), n, seed);
+    std::vector<float> b_orig = b;
+    std::vector<float> A_orig = A;
+
+    // 尝试从文件读取
+    {
+        int file_n;
+        std::vector<float> file_A, file_b;
+        if (load_from_file("files/input.txt", file_A, file_b, file_n)) {
+            A = std::move(file_A); A_orig = A;
+            b = std::move(file_b); b_orig = b;
+            n = file_n;
+            std::cout << "Loaded from files/input.txt, n = " << n << std::endl;
+        }
+    }
+
+    double total_latency = 0.0;
+    bool success = true;
+
+    for (int run = 0; run < num_runs; ++run) {
+        std::vector<float> A_run = A_orig;
+        std::vector<float> b_run = b_orig;
+
+        auto Start = std::chrono::high_resolution_clock::now();
+        int ret = scalar
+            ? gauss_elimination_scalar(A_run.data(), b_run.data(), n)
+            : gauss_elimination_simd(A_run.data(), b_run.data(), n);
+        auto End = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::ratio<1, 1000>> elapsed = End - Start;
+        total_latency += elapsed.count();
+
+        if (ret != 0) {
+            std::cerr << "Run " << run << ": singular matrix!" << std::endl;
+            success = false;
+            continue;
+        }
+
+        float rel_err = verify_solution(A_orig.data(), b_run.data(), b_orig.data(), n);
+        if (rel_err > 1e-3f) {
+            std::cerr << "Run " << run << ": error too large: " << rel_err << std::endl;
+            success = false;
+        }
+    }
+
+    double avg_latency = total_latency / num_runs;
+    std::cout << "Success: " << (success ? "YES" : "NO") << std::endl;
+    std::cout << "Average latency: " << avg_latency << " (ms)" << std::endl;
+
+    if (success && num_runs > 0) {
+        std::vector<float> A_final = A_orig;
+        std::vector<float> b_final = b_orig;
+        if (scalar)
+            gauss_elimination_scalar(A_final.data(), b_final.data(), n);
+        else
+            gauss_elimination_simd(A_final.data(), b_final.data(), n);
+        save_solution("files/solution.txt", b_final.data(), n);
+
+        float rel_err = verify_solution(A_orig.data(), b_final.data(), b_orig.data(), n);
+        std::cout << "Relative error ||Ax-b||/||b||: " << rel_err << std::endl;
+    }
+
+    return success ? 0 : 1;
+}
