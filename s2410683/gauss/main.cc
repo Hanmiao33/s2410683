@@ -79,8 +79,10 @@ float verify_solution(const float *A, const float *x, const float *b_orig, int n
         norm_res += diff * diff;
         norm_b += (double)b_orig[i] * (double)b_orig[i];
     }
-    if (!std::isfinite(norm_res) || !std::isfinite(norm_b))
+    if (!std::isfinite(norm_res) || !std::isfinite(norm_b)) {
+        std::cout << "verify: norm_res=" << norm_res << " norm_b=" << norm_b << std::endl;
         return NAN;
+    }
     return (float)(std::sqrt(norm_res) / (std::sqrt(norm_b) + 1e-12));
 }
 
